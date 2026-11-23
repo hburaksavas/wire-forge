@@ -153,3 +153,7 @@ Native validation opens real WebView2 windows against local HTTP/WebSocket serve
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml --bin wireforge native_webview_capture -- --ignored --nocapture --test-threads=1
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
