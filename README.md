@@ -34,7 +34,11 @@ Use `npm run dev` for the React interface preview. Preview rule editing stays in
 The proxy binds to 127.0.0.1:8080. Start it using the desktop toolbar.
 
 - HTTP absolute-form requests are forwarded unless a mock matches.
-- Mock rules match the HTTP method and exact path, including query parameters. They return UTF-8 text with a configured content type and status. JSON content types are validated. Rules are saved in the application data directory and restored at startup.
+- Mock rules match an HTTP method (or ANY) and the request path including its query string. They return UTF-8 text with a configured content type and status. JSON content types are validated. Rules are saved in the application data directory and restored at startup.
+- Path match types: Exact (the default, and what older rules load as), Wildcard (`*` matches any characters, including `/` and `?`, e.g. `/api/users/*`) and Regex (Rust regex syntax, matched against the whole path and query, e.g. `/users/\d+`). Invalid patterns are rejected when saving.
+- Optional request header conditions, one `Name: value` per line, must all match. Names are case-insensitive, `*` in a value matches any characters, and a name without a value only requires the header. CORS preflight requests ignore header conditions so the real request can still be mocked.
+- Optional response headers are added to the mock response. Content-Type comes from its own field; Content-Length, Transfer-Encoding and connection/proxy headers are managed by WireForge and rejected.
+- Exact rules are checked before Wildcard and Regex rules. Within each group the first matching enabled rule in list order wins.
 - HTTPS CONNECT uses a TCP tunnel by default. Selected targets support HTTPS inspection, capture and mock responses.
 - HTTP response bodies stream to the client with backpressure. Request and response body previews retain up to 16 KiB per entry, with header previews limited to 16 KiB per direction.
 - Request bodies are buffered up to 8 MiB with a 30 second timeout.
@@ -92,7 +96,7 @@ Traffic details include Request, Response and Headers tabs. Request bodies and c
 
 Forwarded responses appear while streaming. Completion, failure or client cancellation updates the same entry using a monotonic revision cursor. Chunk boundaries do not affect the preview. gzip, zlib/raw deflate and Brotli text bodies are decoded for bounded previews. Binary, invalid and unsupported encodings display an availability message. Binary downloads remain pending.
 
-Create mock from response prepares an editable mock draft from a complete, untruncated JSON response, including its method, path/query, body and status. Add rule saves it to the workspace. Mock responses use the configured content type. Additional response header replication is pending.
+Create mock from response prepares an editable mock draft from a complete, untruncated JSON response, including its method, path/query, body and status. Add rule saves it to the workspace. Mock responses use the configured content type and any response headers added to the rule. Copying the captured response headers into the draft automatically is pending.
 
 Tests additionally verify request capture, complete body capture, bounded large previews with full downstream delivery, chunked response revisions, incomplete bodies, header limits and encoded/binary preview handling.
 

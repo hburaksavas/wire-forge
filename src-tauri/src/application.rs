@@ -624,18 +624,14 @@ fn mock_response(
         Some(query) => format!("{}?{query}", url.path()),
         None => url.path().into(),
     };
-    let exact = rules
-        .iter()
-        .find(|rule| rule.enabled && rule.method == method && rule.path == path);
-    let preflight = if method == "OPTIONS" && header(request_headers, "origin").is_some() {
-        header(request_headers, "access-control-request-method").and_then(|requested| {
-            rules
-                .iter()
-                .find(|rule| rule.enabled && rule.method == requested && rule.path == path)
-        })
-    } else {
-        None
-    };
+    let exact = crate::mock_match::find(rules, method, &path, Some(request_headers));
+    let requested = header(request_headers, "access-control-request-method");
+    let preflight =
+        if exact.is_none() && method == "OPTIONS" && header(request_headers, "origin").is_some() {
+            requested.and_then(|requested| crate::mock_match::find(rules, requested, &path, None))
+        } else {
+            None
+        };
     let rule = exact.or(preflight)?;
     let status = if exact.is_none() { 204 } else { rule.status };
     let mut response_headers = vec![json!({"name":"Content-Type", "value":rule.content_type})];
@@ -647,12 +643,19 @@ fn mock_response(
         ]);
         if preflight.is_some() {
             response_headers
-                .push(json!({"name":"Access-Control-Allow-Methods", "value":rule.method}));
+                .push(json!({"name":"Access-Control-Allow-Methods", "value":requested.unwrap_or(&rule.method)}));
             if let Some(names) = header(request_headers, "access-control-request-headers") {
                 response_headers
                     .push(json!({"name":"Access-Control-Allow-Headers", "value":names}));
             }
         }
+    }
+    if exact.is_some() {
+        response_headers.extend(
+            rule.response_headers
+                .iter()
+                .map(|pair| json!({"name":pair.name, "value":pair.value})),
+        );
     }
     let body = if method == "HEAD" || [204, 205, 304].contains(&status) {
         ""

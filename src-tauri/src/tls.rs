@@ -545,6 +545,7 @@ mod tests {
             body: "{\"secure\":true}".into(),
             status: 201,
             enabled: true,
+            ..Default::default()
         });
         let proxy = Proxy::start("127.0.0.1:0", store.clone()).await.unwrap();
         let (status, body) = get(proxy.address, "mock.invalid:443", client.clone(), "/secure")

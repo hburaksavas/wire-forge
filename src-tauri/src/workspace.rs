@@ -197,6 +197,7 @@ mod tests {
             body: "{\"saved\":true}".into(),
             status: 200,
             enabled: true,
+            ..Default::default()
         }
     }
 

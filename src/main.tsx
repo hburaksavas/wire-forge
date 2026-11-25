@@ -5,7 +5,25 @@ import './style.css';
 import {Icon, CodeView, EmptyState, addressParts} from './ui';
 import {createPreviewEntries} from './preview';
 
-type Rule = {id: string; method: string; path: string; body: string; contentType: string; status: number; enabled: boolean};
+type MatchType = 'exact' | 'wildcard' | 'regex';
+type HeaderPair = {name: string; value: string};
+type Rule = {id: string; method: string; path: string; body: string; contentType: string; status: number; enabled: boolean; matchType?: MatchType; requestHeaders?: HeaderPair[]; responseHeaders?: HeaderPair[]};
+const matchLabels: Record<MatchType, string> = {exact: 'Exact', wildcard: 'Wildcard', regex: 'Regex'};
+const pathHints: Record<MatchType, string> = {
+  exact: 'Exact path and query, e.g. /api/health?ready=1',
+  wildcard: '* matches any characters, including / and ?, e.g. /api/users/*',
+  regex: 'Regular expression matched against the full path and query, e.g. /users/\\d+',
+};
+
+// One "Name: value" pair per line. An empty value is allowed for request conditions.
+function parseHeaderLines(source: string, label: string): HeaderPair[] {
+  return source.split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+    const separator = line.indexOf(':');
+    const name = (separator < 0 ? line : line.slice(0, separator)).trim();
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) throw new Error(`${label}: "${line}" needs a valid header name.`);
+    return {name, value: separator < 0 ? '' : line.slice(separator + 1).trim()};
+  });
+}
 type SocketRule = {id: string; url: string; direction: string; matchText: string; responseText: string; enabled: boolean};
 type Entry = {
   messages: {direction: string; opcode: number; elapsedMs: number; payload: string; bytes: number; truncated: boolean; kind: string}[];
@@ -53,6 +71,9 @@ function App() {
   const [body, setBody] = useState('{\n  "status": "ok"\n}');
   const [status, setStatus] = useState(200);
   const [contentType, setContentType] = useState('application/json');
+  const [matchType, setMatchType] = useState<MatchType>('exact');
+  const [conditionText, setConditionText] = useState('');
+  const [responseHeaderText, setResponseHeaderText] = useState('');
   const [upstream, setUpstream] = useState<Upstream>({enabled: false, host: '', port: 3128, username: '', basicAuth: false, passwordConfigured: false});
   const [password, setPassword] = useState('');
   const [settingsMessage, setSettingsMessage] = useState('');
@@ -244,11 +265,19 @@ function App() {
   function addRule() {
     try {
       if (contentType.toLowerCase().includes('json')) JSON.parse(body);
-      if (!path.startsWith('/')) throw new Error('The path must start with /.');
+      if (matchType === 'regex') {
+        if (!path) throw new Error('Enter a regular expression.');
+        try { new RegExp(path); } catch { throw new Error('Enter a valid regular expression.'); }
+      } else if (!path.startsWith('/')) throw new Error('The path must start with /.');
       if (!Number.isInteger(status) || status < 200 || status > 599) throw new Error('Enter a status from 200 to 599.');
-      if (rules.some(rule => rule.method === method && rule.path === path)) throw new Error('A rule for this method and path already exists.');
-      void updateRules([...rules, {id: crypto.randomUUID(), method, path, body, contentType, status, enabled: true}]);
-    } catch (e) { setError(e instanceof SyntaxError ? 'Enter a valid JSON response.' : String(e)); }
+      const requestHeaders = parseHeaderLines(conditionText, 'Request condition');
+      const responseHeaders = parseHeaderLines(responseHeaderText, 'Response header');
+      const conditionKey = JSON.stringify(requestHeaders);
+      if (rules.some(rule => rule.method === method && rule.path === path && (rule.matchType ?? 'exact') === matchType && JSON.stringify(rule.requestHeaders ?? []) === conditionKey)) {
+        throw new Error('A rule with this method, path and conditions already exists.');
+      }
+      void updateRules([...rules, {id: crypto.randomUUID(), method, path, body, contentType, status, enabled: true, matchType, requestHeaders, responseHeaders}]);
+    } catch (e) { setError(e instanceof SyntaxError ? 'Enter a valid JSON response.' : e instanceof Error ? e.message : String(e)); }
   }
 
   async function clearTraffic() {
@@ -344,6 +373,9 @@ function App() {
       const url = new URL(entry.url, 'http://wireforge.local');
       setMethod(entry.method);
       setPath(url.pathname + url.search);
+      setMatchType('exact');
+      setConditionText('');
+      setResponseHeaderText('');
       setStatus(entry.status);
       setBody(formatted);
       setTab('Mock rules');
@@ -462,12 +494,18 @@ function App() {
       </section> : tab === 'Mock rules' ? <div className="mock-layout">
         <section className="panel mock-editor">
           <div className="section-heading"><h2>Response rule</h2><span>HTTP</span></div>
-          <div className="form-row">
-            <label>Method<select value={method} onChange={e => setMethod(e.target.value)}>{['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'].map(value => <option key={value}>{value}</option>)}</select></label>
+          <div className="form-row rule-match-row">
+            <label>Method<select value={method} onChange={e => setMethod(e.target.value)}>{['ANY', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'].map(value => <option key={value}>{value}</option>)}</select></label>
+            <label>Match<select value={matchType} onChange={e => setMatchType(e.target.value as MatchType)}>{(Object.keys(matchLabels) as MatchType[]).map(value => <option key={value} value={value}>{matchLabels[value]}</option>)}</select></label>
             <label>Status<input type="number" min="200" max="599" value={status} onChange={e => setStatus(Number(e.target.value))}/></label>
           </div>
-          <label>Path<input value={path} onChange={e => setPath(e.target.value)} title="Exact path and query parameters"/></label>
+          <label>Path<input value={path} spellCheck={false} onChange={e => setPath(e.target.value)} title={pathHints[matchType]} placeholder={pathHints[matchType]}/></label>
           <label>Content type<input value={contentType} onChange={e => setContentType(e.target.value)}/></label>
+          <details className="rule-advanced" open={!!conditionText || !!responseHeaderText}>
+            <summary>Header conditions and response headers</summary>
+            <label>Request must include<textarea rows={3} spellCheck={false} value={conditionText} onChange={e => setConditionText(e.target.value)} placeholder={'X-Tenant: acme-*\nAuthorization'} title="One header per line. * matches any characters in the value. A name without a value only requires the header."/></label>
+            <label>Response headers<textarea rows={3} spellCheck={false} value={responseHeaderText} onChange={e => setResponseHeaderText(e.target.value)} placeholder={'Cache-Control: no-store\nX-Mocked-By: wireforge'} title="One Name: value per line. Content-Type uses the field above."/></label>
+          </details>
           <label>Response<textarea rows={12} spellCheck={false} value={body} onChange={e => setBody(e.target.value)}/></label>
           <button className="primary" disabled={!ready || busy || !!startupWarning} onClick={addRule}>Add rule</button>
         </section>
@@ -475,7 +513,7 @@ function App() {
           <div className="table-title"><strong>Saved rules <span>{rules.length + socketRules.length}</span></strong><Icon name="layers" size={14}/></div>
           {socketRules.length > 0 && <details><summary>WebSocket rules · {socketRules.length}</summary>{renderSocketRules(socketRules)}</details>}
           {rules.length ? rules.map(rule => <article key={rule.id}>
-            <div className="rule-heading"><strong className={!rule.enabled ? 'muted' : ''}>{rule.method} {rule.path}</strong><span className="badge">{rule.status}</span></div>
+            <div className="rule-heading"><strong className={!rule.enabled ? 'muted' : ''}>{rule.method} {rule.path}</strong>{(rule.matchType ?? 'exact') !== 'exact' && <span className="badge">{matchLabels[rule.matchType!]}</span>}{!!rule.requestHeaders?.length && <span className="badge" title={rule.requestHeaders.map(pair => pair.value ? `${pair.name}: ${pair.value}` : pair.name).join('\n')}>{rule.requestHeaders.length} cond.</span>}<span className="badge">{rule.status}</span></div>
             <div className="rule-actions"><button disabled={!ready || busy || !!startupWarning} onClick={() => void updateRules(rules.map(item => item.id === rule.id ? {...item, enabled: !item.enabled} : item))}>{rule.enabled ? 'Disable' : 'Enable'}</button><button disabled={!ready || busy || !!startupWarning} onClick={() => void updateRules(rules.filter(item => item.id !== rule.id))}>Delete</button><details><summary>Body</summary><pre>{rule.body}</pre></details></div>
           </article>) : <EmptyState title="No HTTP mock rules" detail="Create a rule or use a captured response." icon="layers"/>}
         </section>

@@ -4,6 +4,7 @@
 mod application;
 mod capture;
 mod key_protection;
+mod mock_match;
 mod proxy;
 mod replay;
 mod socket;

@@ -29,7 +29,22 @@ type Body = BoxBody<Bytes, Error>;
 const TIMEOUT: Duration = Duration::from_secs(30);
 const HISTORY: usize = 1000;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MatchType {
+    #[default]
+    Exact,
+    Wildcard,
+    Regex,
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HeaderPair {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MockRule {
     pub id: String,
@@ -40,7 +55,26 @@ pub struct MockRule {
     pub content_type: String,
     pub status: u16,
     pub enabled: bool,
+    #[serde(default)]
+    pub match_type: MatchType,
+    /// Every condition must match a request header. An empty value requires presence only.
+    #[serde(default)]
+    pub request_headers: Vec<HeaderPair>,
+    #[serde(default)]
+    pub response_headers: Vec<HeaderPair>,
 }
+
+const RESERVED_RESPONSE_HEADERS: [&str; 9] = [
+    "content-type",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "upgrade",
+    "te",
+    "trailer",
+    "proxy-connection",
+];
 
 fn default_content_type() -> String {
     "application/json".into()
@@ -52,17 +86,49 @@ pub fn validate_rules(rules: &[MockRule]) -> Result<(), String> {
     }
     let mut seen = std::collections::HashSet::new();
     for rule in rules {
-        if !rule.path.starts_with('/')
-            || rule.path.contains('#')
+        let path_valid = match rule.match_type {
+            MatchType::Exact | MatchType::Wildcard => {
+                rule.path.starts_with('/') && !rule.path.contains('#')
+            }
+            MatchType::Regex => !rule.path.is_empty(),
+        };
+        if !path_valid
+            || rule.path.len() > 2048
             || !(200..=599).contains(&rule.status)
             || rule.body.len() > 1_048_576
-            || !["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
-                .contains(&rule.method.as_str())
+            || ![
+                "ANY", "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD",
+            ]
+            .contains(&rule.method.as_str())
         {
             return Err(
                 "Use an absolute path, a supported method, status 200–599 and a body under 1 MiB."
                     .into(),
             );
+        }
+        if rule.match_type == MatchType::Regex {
+            crate::mock_match::compile(&rule.path)
+                .map_err(|_| format!("Invalid regular expression: {}", rule.path))?;
+        }
+        if rule.request_headers.len() > 16
+            || rule.request_headers.iter().any(|condition| {
+                condition.name.parse::<hyper::header::HeaderName>().is_err()
+                    || condition.value.len() > 1024
+            })
+        {
+            return Err("Use up to 16 request header conditions with valid names.".into());
+        }
+        if rule.response_headers.len() > 32
+            || rule.response_headers.iter().any(|pair| {
+                let name = pair.name.to_ascii_lowercase();
+                name.parse::<hyper::header::HeaderName>().is_err()
+                    || RESERVED_RESPONSE_HEADERS.contains(&name.as_str())
+                    || name.starts_with("proxy-")
+                    || pair.value.len() > 8192
+                    || pair.value.parse::<hyper::header::HeaderValue>().is_err()
+            })
+        {
+            return Err("Use up to 32 valid response headers. Content-Type, Content-Length and connection headers are managed by WireForge.".into());
         }
         if rule.content_type.is_empty()
             || rule.content_type.len() > 255
@@ -77,8 +143,13 @@ pub fn validate_rules(rules: &[MockRule]) -> Result<(), String> {
             serde_json::from_str::<serde_json::Value>(&rule.body)
                 .map_err(|_| "Enter a valid JSON response.".to_string())?;
         }
-        if !seen.insert((&rule.method, &rule.path)) {
-            return Err("Duplicate method and path.".into());
+        if !seen.insert((
+            &rule.method,
+            rule.match_type,
+            &rule.path,
+            &rule.request_headers,
+        )) {
+            return Err("Duplicate rule for this method, match and conditions.".into());
         }
     }
     Ok(())
@@ -517,13 +588,14 @@ fn handle_inner(
             .path_and_query()
             .map(|value| value.as_str())
             .unwrap_or("/");
-        let rule = store
-            .rules
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|rule| rule.enabled && rule.method == method && rule.path == path)
-            .cloned();
+        let match_headers = crate::mock_match::header_list(request.headers());
+        let rule = crate::mock_match::find(
+            &store.rules.lock().unwrap(),
+            &method,
+            path,
+            Some(&match_headers),
+        )
+        .cloned();
         let inspected = request.extensions().get::<Inspected>().is_some();
         if rule.is_none()
             && ((request.uri().scheme_str() != Some("http")
@@ -586,6 +658,14 @@ fn handle_inner(
             result
                 .headers_mut()
                 .insert(header::CONTENT_TYPE, rule.content_type.parse().unwrap());
+            for pair in &rule.response_headers {
+                if let (Ok(name), Ok(value)) = (
+                    pair.name.parse::<header::HeaderName>(),
+                    pair.value.parse::<header::HeaderValue>(),
+                ) {
+                    result.headers_mut().append(name, value);
+                }
+            }
             let id = store.respond(
                 id,
                 rule.status,
@@ -979,6 +1059,7 @@ mod tests {
             body: "{}".into(),
             status: 200,
             enabled: true,
+            ..Default::default()
         };
         assert!(validate_rules(&[rule.clone()]).is_ok());
         assert!(validate_rules(&[rule.clone(), rule.clone()]).is_err());
@@ -987,6 +1068,46 @@ mod tests {
             ..rule
         }])
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn serves_pattern_mocks_with_header_conditions_and_response_headers() {
+        let store = Arc::new(Store::default());
+        store.rules.lock().unwrap().push(MockRule {
+            id: "pattern".into(),
+            method: "ANY".into(),
+            path: r"/users/\d+(\?.*)?".into(),
+            body: "pattern".into(),
+            content_type: "text/plain".into(),
+            status: 202,
+            enabled: true,
+            match_type: MatchType::Regex,
+            request_headers: vec![HeaderPair {
+                name: "X-Env".into(),
+                value: "stag*".into(),
+            }],
+            response_headers: vec![HeaderPair {
+                name: "X-Mocked-By".into(),
+                value: "wireforge".into(),
+            }],
+        });
+        let proxy = Proxy::start("127.0.0.1:0", store).await.unwrap();
+        let matched = exchange(
+            proxy.address,
+            "PUT /users/42?full=1 HTTP/1.1\r\nHost: localhost\r\nX-Env: staging\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        )
+        .await;
+        assert!(matched.starts_with("HTTP/1.1 202"), "{matched}");
+        assert!(matched.to_lowercase().contains("x-mocked-by: wireforge"));
+        assert!(matched.ends_with("pattern"));
+        let unmatched = exchange(
+            proxy.address,
+            "GET /users/42 HTTP/1.1\r\nHost: localhost\r\nX-Env: prod\r\nConnection: close\r\n\r\n"
+                .into(),
+        )
+        .await;
+        assert!(unmatched.starts_with("HTTP/1.1 400"), "{unmatched}");
+        proxy.stop().await;
     }
 
     #[tokio::test]
@@ -1005,6 +1126,7 @@ mod tests {
             content_type: "text/plain; charset=utf-8".into(),
             status: 404,
             enabled: true,
+            ..Default::default()
         };
         assert!(validate_rules(&[rule.clone()]).is_ok());
         store.rules.lock().unwrap().push(rule);
@@ -1033,6 +1155,7 @@ mod tests {
             body: "{\"ready\":true}".into(),
             status: 201,
             enabled: true,
+            ..Default::default()
         });
         let proxy = Proxy::start("127.0.0.1:0", store.clone()).await.unwrap();
         let address = proxy.address;
@@ -1253,6 +1376,7 @@ mod tests {
             body: "{}".into(),
             status: 200,
             enabled: true,
+            ..Default::default()
         });
         let proxy = Proxy::start("127.0.0.1:0", store).await.unwrap();
         let mock = exchange(proxy.address, "GET http://destination.invalid/mock HTTP/1.1\r\nHost: destination.invalid\r\nConnection: close\r\n\r\n".into()).await;

@@ -28,6 +28,7 @@ rustls-pemfile = "2"
 sha2 = "0.10"
 time = "0.3"
 zeroize = "1"
+regex = "1"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

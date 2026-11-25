@@ -185,3 +185,4 @@ nav { margin-top: 32px; }
 .rule-list > .empty { flex: 1; height: auto; min-height: 220px; }
 .rule-list > .table-title, .rule-list > details, .rule-list > article { flex-shrink: 0; }
 
+.form-row.rule-match-row { grid-template-columns:1fr 1fr 90px; }.rule-advanced { margin:2px 0 12px; }.rule-advanced[open] summary { margin-bottom:8px; }.mock-editor .rule-advanced textarea { min-height:64px; }

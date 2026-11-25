@@ -4947,6 +4947,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rcgen",
+ "regex",
  "rustls-native-certs",
  "rustls-pemfile",
  "serde",

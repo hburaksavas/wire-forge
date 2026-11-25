@@ -10,6 +10,7 @@ fn rule() -> MockRule {
         content_type: "application/json".into(),
         status: 201,
         enabled: true,
+        ..Default::default()
     }
 }
 

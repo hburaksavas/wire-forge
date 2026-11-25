@@ -250,6 +250,7 @@ mod tests {
             status: 202,
             body: "{}".into(),
             enabled: true,
+            ..Default::default()
         });
         let proxy = Proxy::start("127.0.0.1:0", store.clone()).await.unwrap();
         assert_eq!(
@@ -369,6 +370,7 @@ mod tests {
             body: r#"{"mock":true}"#.into(),
             content_type: "application/json".into(),
             enabled: true,
+            ..Default::default()
         });
         let proxy = Proxy::start("127.0.0.1:0", store.clone()).await.unwrap();
         let request = ReplayInput {
